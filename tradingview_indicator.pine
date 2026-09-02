@@ -1,0 +1,202 @@
+//@version=5
+indicator("NSE Options Flow Bias & Max Pain", overlay=true, max_lines_count=500, max_boxes_count=500)
+
+// =============================================================================
+// NSE Options Flow Indicator for TradingView
+// Adapts Max Pain and PCR Flow Bias concepts for price chart overlay
+// =============================================================================
+
+// ─────────────────────────────────────────────────────────────────────────
+// INPUT PARAMETERS
+// ─────────────────────────────────────────────────────────────────────────
+
+lookback = input.int(20, title="Lookback Period (bars)", minval=5, maxval=100)
+atm_window = input.int(5, title="ATM Window Strikes (±N)", minval=1, maxval=10)
+pcr_ma_period = input.int(9, title="PCR Moving Average Period", minval=3, maxval=50)
+volume_threshold = input.float(1.0, title="Volume Threshold Multiplier", minval=0.5, maxval=5.0)
+
+// Display toggles
+show_max_pain = input.bool(true, title="Show Max Pain Level")
+show_pcr_bias = input.bool(true, title="Show PCR Flow Bias")
+show_support_resistance = input.bool(true, title="Show S/R Levels")
+show_alerts = input.bool(true, title="Show Alert Zones")
+
+// Colors
+color_bullish = input.color(color.new(color.green, 80), title="Bullish Bias Color")
+color_bearish = input.color(color.new(color.red, 80), title="Bearish Bias Color")
+color_neutral = input.color(color.new(color.gray, 80), title="Neutral Bias Color")
+color_max_pain = input.color(color.new(color.orange, 70), title="Max Pain Color")
+
+// ─────────────────────────────────────────────────────────────────────────
+// HELPER FUNCTIONS
+// ─────────────────────────────────────────────────────────────────────────
+
+// Calculate volume-weighted price deviation (proxy for OI concentration)
+// Since we don't have actual OI data on charts, we use volume as a proxy
+f_oi_proxy(vol, price, lookback_len) =>
+    avg_vol = ta.sma(vol, lookback_len)
+    vol_weighted = vol > (avg_vol * volume_threshold)
+    vol_weighted ? price : na
+
+// Detect support level (price bounces, high volume rejection)
+f_support(lookback_len) =>
+    support = ta.lowest(low, lookback_len)
+    support
+
+// Detect resistance level (price rejection, high volume on decline)
+f_resistance(lookback_len) =>
+    resistance = ta.highest(high, lookback_len)
+    resistance
+
+// Calculate simplified PCR proxy using volume and price action
+// Bearish candles (volume) = Put buying pressure
+// Bullish candles (volume) = Call buying pressure
+f_pcr_proxy(lookback_len) =>
+    bearish_vol = 0.0
+    bullish_vol = 0.0
+    
+    for i = 0 to lookback_len - 1
+        if close[i] < open[i]
+            bearish_vol += volume[i]  // Proxy for put OI
+        else
+            bullish_vol += volume[i]  // Proxy for call OI
+    
+    pcr = bullish_vol > 0 ? bearish_vol / bullish_vol : 0.0
+    pcr
+
+// Calculate max pain (price with minimum total loss across OTM payouts)
+// Approximation: find where volume * price deviation is minimized
+f_max_pain(lookback_len) =>
+    min_loss = 999999.0
+    max_pain_level = close
+    
+    // Scan through recent high/low range
+    price_range = ta.highest(high, lookback_len) - ta.lowest(low, lookback_len)
+    scan_step = price_range / 10.0
+    
+    scan_price = ta.lowest(low, lookback_len)
+    while scan_price <= ta.highest(high, lookback_len)
+        // Approximate loss calculation
+        total_loss = 0.0
+        for i = 0 to math.min(lookback_len - 1, 15)
+            bar_high = high[i]
+            bar_low = low[i]
+            bar_vol = volume[i]
+            
+            // OTM call loss
+            call_loss = bar_high > scan_price ? (bar_high - scan_price) * bar_vol : 0
+            // OTM put loss
+            put_loss = bar_low < scan_price ? (scan_price - bar_low) * bar_vol : 0
+            
+            total_loss += call_loss + put_loss
+        
+        if total_loss < min_loss
+            min_loss := total_loss
+            max_pain_level := scan_price
+        
+        scan_price += scan_step
+    
+    max_pain_level
+
+// ─────────────────────────────────────────────────────────────────────────
+// CALCULATION LOGIC
+// ─────────────────────────────────────────────────────────────────────────
+
+// Support & Resistance
+support_level = f_support(lookback)
+resistance_level = f_resistance(lookback)
+midpoint = (support_level + resistance_level) / 2
+
+// Max Pain
+max_pain = f_max_pain(lookback)
+
+// PCR Flow Bias
+pcr_current = f_pcr_proxy(lookback)
+pcr_sma = ta.sma(pcr_current, pcr_ma_period)
+pcr_delta = pcr_current - pcr_sma
+
+// Flow Bias Classification
+flow_bias = 
+    pcr_delta > 0.05 ? "BULLISH (Put Writing)" :
+    pcr_delta < -0.05 ? "BEARISH (Call Writing)" :
+    "NEUTRAL / BALANCED"
+
+bias_color =
+    pcr_delta > 0.05 ? color_bullish :
+    pcr_delta < -0.05 ? color_bearish :
+    color_neutral
+
+// ─────────────────────────────────────────────────────────────────────────
+// PLOTTING & VISUALIZATION
+// ─────────────────────────────────────────────────────────────────────────
+
+// Max Pain Level
+if show_max_pain
+    plot(max_pain, title="Max Pain", color=color_max_pain, linewidth=2, style=plot.style_dashed)
+
+// Support & Resistance Zones
+if show_support_resistance
+    plot(support_level, title="Support Level", color=color.new(color.blue, 60), linewidth=1, style=plot.style_dotted)
+    plot(resistance_level, title="Resistance Level", color=color.new(color.red, 60), linewidth=1, style=plot.style_dotted)
+
+// PCR Flow Bias Background
+if show_pcr_bias
+    bgcolor(bias_color, title="Flow Bias Background")
+
+// Alert Zones (when price approaches max pain or key levels)
+if show_alerts
+    if abs(close - max_pain) < (ta.highest(high, lookback) - ta.lowest(low, lookback)) * 0.02
+        alertbox = box.new(bar_index - 5, ta.highest(high, 5), bar_index, ta.lowest(low, 5), 
+                           bgcolor=color.new(color_max_pain, 20), border_color=color_max_pain, 
+                           border_width=2, xloc=xloc.bar_index)
+
+// ─────────────────────────────────────────────────────────────────────────
+// INFO PANEL / TABLE
+// ─────────────────────────────────────────────────────────────────────────
+
+var table_info = table.new(position.top_right, 4, 6, bgcolor=color.new(color.black, 80), 
+                           frame_color=color.gray, frame_width=1)
+
+if barstate.islast
+    // Title row
+    table.cell(table_info, 0, 0, "NSE Options Metrics", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 50))
+    
+    // Data rows
+    table.cell(table_info, 0, 1, "Spot Price", text_color=color.white, text_size=size.small)
+    table.cell(table_info, 1, 1, str.tostring(close, "#.##"), text_color=color.yellow, text_size=size.small)
+    
+    table.cell(table_info, 0, 2, "Max Pain", text_color=color.white, text_size=size.small)
+    table.cell(table_info, 1, 2, str.tostring(max_pain, "#.##"), text_color=color_max_pain, text_size=size.small)
+    
+    table.cell(table_info, 0, 3, "Support", text_color=color.white, text_size=size.small)
+    table.cell(table_info, 1, 3, str.tostring(support_level, "#.##"), text_color=color.blue, text_size=size.small)
+    
+    table.cell(table_info, 0, 4, "Resistance", text_color=color.white, text_size=size.small)
+    table.cell(table_info, 1, 4, str.tostring(resistance_level, "#.##"), text_color=color.red, text_size=size.small)
+    
+    table.cell(table_info, 0, 5, "Flow Bias", text_color=color.white, text_size=size.small)
+    table.cell(table_info, 1, 5, flow_bias, text_color=bias_color, text_size=size.small)
+    
+    table.cell(table_info, 2, 1, "PCR", text_color=color.white, text_size=size.small)
+    table.cell(table_info, 3, 1, str.tostring(pcr_current, "#.###"), text_color=color.orange, text_size=size.small)
+    
+    table.cell(table_info, 2, 2, "PCR SMA", text_color=color.white, text_size=size.small)
+    table.cell(table_info, 3, 2, str.tostring(pcr_sma, "#.###"), text_color=color.orange, text_size=size.small)
+    
+    table.cell(table_info, 2, 3, "PCR Delta", text_color=color.white, text_size=size.small)
+    table.cell(table_info, 3, 3, str.tostring(pcr_delta, "#.####"), text_color=bias_color, text_size=size.small)
+
+// ─────────────────────────────────────────────────────────────────────────
+// ALERTS FOR TRADERS
+// ─────────────────────────────────────────────────────────────────────────
+
+// Alert when price reaches max pain
+alert_max_pain = abs(close - max_pain) < (ta.highest(high, 5) - ta.lowest(low, 5)) * 0.01
+if alert_max_pain and show_alerts
+    alert("Price near Max Pain Level: " + str.tostring(max_pain, "#.##"))
+
+// Alert on flow bias shift
+prev_bias = flow_bias[1]
+bias_shift = flow_bias != prev_bias
+if bias_shift and show_alerts and barstate.islast
+    alert("Flow Bias Shift to: " + flow_bias)
